@@ -475,7 +475,9 @@ write_csv(final_data, here("ready_data","grave-m.csv"))
         
 
 
-library(haven)
+library(dplyr)
+library(tidyr)
+library(haven) # For reading Stata (.dta) files
 library(WDI)
 library(zoo)   # For interpolation
 library(countrycode)
@@ -499,29 +501,123 @@ maddison_clean <- maddison_raw %>%
         # Variable 'gdppc' is Real GDP per capita (2011 $).
         # Variable 'pop' is Population (in thousands).
         mutate(
-                COWcode = countrycode(countrycode, "iso3c", "cown"),
+                # Custom match for historical entities (CSK, SUN, YUG)
+                COWcode = countrycode(
+                        countrycode, 
+                        "iso3c", 
+                        "cown",
+                        custom_match = c(
+                                "CSK" = 315, # Czechoslovakia -> 315
+                                "SUN" = 365, # Soviet Union -> 365
+                                "YUG" = 345, # Yugoslavia -> 345
+                                "SRB" = 345  # Serbia -> 345 (Successor to YUG in COW)
+                        )
+                ),
                 # Convert Pop to raw units (Maddison is in 1000s)
                 pop_raw = pop * 1000
         ) %>%
         filter(!is.na(COWcode)) %>%
         select(COWcode, year, maddison_gdp_pc = gdppc, maddison_pop = pop_raw)
 
+
+
 # -------------------------------------------------------------------------
 # 2. WDI & WGI (Modern Indicators & Governance)
 # -------------------------------------------------------------------------
 # Fetch WDI/WGI from 1960-2024
-indicators <- c(
+# STRATEGY: Batch fetch by country code to avoid API "Invalid value" or timeouts.
+
+# Define Indicators
+indicators_econ <- c(
         "gdp_pc" = "NY.GDP.PCAP.PP.KD",       # GDP pc PPP (Constant 2017)
         "pop" = "SP.POP.TOT",                 # Total Population
-        "resource_rents" = "NY.GDP.TOTL.RT.ZS", # Natural Resource Rents %
+        "resource_rents" = "NY.GDP.TOTL.RT.ZS" # Natural Resource Rents %
+)
+
+indicators_gov <- c(
         "corruption_control" = "CC.EST",      # WGI Control of Corruption
         "govt_effectiveness" = "GE.EST"       # WGI Govt Effectiveness
 )
 
-wdi_raw <- WDI(indicator = indicators, start = 1960, end = 2024, extra = TRUE)
+# Helper function to fetch in batches safely
+fetch_wdi_batched <- function(indicators, start_year, end_year) {
+        # USE WDI INTERNAL LIST to avoid requesting invalid ISO codes (prevents warnings)
+        all_iso2 <- unique(WDI::WDI_data$country$iso2c)
+        
+        # Remove NAs and empty strings if any
+        all_iso2 <- all_iso2[!is.na(all_iso2) & all_iso2 != ""]
+        
+        # Split into chunks of 50 countries to keep API requests small
+        chunks <- split(all_iso2, ceiling(seq_along(all_iso2) / 50))
+        
+        results_list <- list()
+        
+        for (i in seq_along(chunks)) {
+                tryCatch({
+                        # print(paste("Fetching batch", i, "of", length(chunks))) # Optional progress
+                        dat <- WDI(
+                                indicator = indicators,
+                                country = chunks[[i]],
+                                start = start_year,
+                                end = end_year,
+                                extra = FALSE
+                        )
+                        results_list[[i]] <- dat
+                        # Small pause to be polite to the API
+                        Sys.sleep(0.5)
+                }, error = function(e) {
+                        warning(paste("Batch", i, "failed:", e$message))
+                })
+        }
+        
+        bind_rows(results_list)
+}
+
+# Execute Batched Downloads
+wdi_econ <- fetch_wdi_batched(indicators_econ, 1960, 2024)
+
+# Robustness Check: Standardize names using base R (more robust than rename)
+# Check for original codes and rename to simple names if present
+names(wdi_econ)[names(wdi_econ) == "NY.GDP.PCAP.PP.KD"] <- "gdp_pc"
+names(wdi_econ)[names(wdi_econ) == "SP.POP.TOT"] <- "pop"
+names(wdi_econ)[names(wdi_econ) == "NY.GDP.TOTL.RT.ZS"] <- "resource_rents"
+
+# Safety Net: If columns are still missing (API fetch failed to return them), create as NA
+if (!"gdp_pc" %in% names(wdi_econ)) wdi_econ$gdp_pc <- NA
+if (!"pop" %in% names(wdi_econ)) wdi_econ$pop <- NA
+if (!"resource_rents" %in% names(wdi_econ)) wdi_econ$resource_rents <- NA
+
+wdi_gov  <- fetch_wdi_batched(indicators_gov, 1960, 2024)
+
+# Robustness Check for Governance
+names(wdi_gov)[names(wdi_gov) == "CC.EST"] <- "corruption_control"
+names(wdi_gov)[names(wdi_gov) == "GE.EST"] <- "govt_effectiveness"
+
+# Safety Net for Governance
+if (!"corruption_control" %in% names(wdi_gov)) wdi_gov$corruption_control <- NA
+if (!"govt_effectiveness" %in% names(wdi_gov)) wdi_gov$govt_effectiveness <- NA
+
+# Merge batches and clean
+# Note: specific joins to ensure we align on available iso2c/year keys
+wdi_raw <- wdi_econ %>%
+        left_join(wdi_gov %>% select(iso2c, year, corruption_control, govt_effectiveness), 
+                  by = c("iso2c", "year"))
 
 wdi_clean <- wdi_raw %>%
-        mutate(COWcode = countrycode(iso2c, "iso2c", "cown")) %>%
+        mutate(
+                # Resolve historical ambiguities manually
+                COWcode = countrycode(
+                        iso2c, 
+                        "iso2c", 
+                        "cown",
+                        custom_match = c(
+                                "CS" = 315, # Czechoslovakia -> 315
+                                "SU" = 365, # Soviet Union -> 365
+                                "YU" = 345, # Yugoslavia -> 345
+                                "RS" = 345  # Serbia -> 345 (Successor to YUG in COW)
+                        )
+                )
+        ) %>%
         filter(!is.na(COWcode)) %>%
         group_by(COWcode) %>%
         arrange(year) %>%
@@ -534,13 +630,16 @@ wdi_clean <- wdi_raw %>%
         select(COWcode, year, wdi_gdp_pc = gdp_pc, wdi_pop = pop, resource_rents, 
                corruption_control, govt_effectiveness)
 
+
+
 # -------------------------------------------------------------------------
 # 3. ROSS OIL & GAS (Historical Rents)
 # -------------------------------------------------------------------------
-ross_raw <- read.csv("ross_oil_gas.csv")
+ross_raw <- read.csv(here("raw-data","ross_oil_gas.csv"))
 
+# NOTE: Corrected variable name to 'oil_gas_valuePOP_2014' based on colnames()
 ross_clean <- ross_raw %>%
-        select(COWcode = id, year, oil_gas_pop = oil_gas_pop_2014) %>%
+        select(COWcode = id, year, oil_gas_pop = oil_gas_valuePOP_2014) %>%
         mutate(
                 is_petro_state_ross = ifelse(oil_gas_pop > 100, 1, 0)
         )
@@ -548,12 +647,24 @@ ross_clean <- ross_raw %>%
 # -------------------------------------------------------------------------
 # 4. SWIID (Inequality)
 # -------------------------------------------------------------------------
-swiid_raw <- read.csv("swiid_summary.csv")
+swiid_raw <- read.csv(here("raw-data","swiid_summary.csv"))
 
 swiid_clean <- swiid_raw %>%
-        mutate(COWcode = countrycode(country, "country.name", "cown")) %>%
+        mutate(
+                # Fix ambiguous matches for Serbia and Micronesia
+                COWcode = countrycode(
+                        country, 
+                        "country.name", 
+                        "cown",
+                        custom_match = c(
+                                "Serbia" = 345,     # Serbia -> 345 (Successor to YUG in COW)
+                                "Micronesia" = 987  # Federated States of Micronesia -> 987
+                        )
+                )
+        ) %>%
         filter(!is.na(COWcode)) %>%
-        select(COWcode, year, gini_disp = gini_disp_mean)
+        # NOTE: Changed from gini_disp_mean to gini_disp based on file check
+        select(COWcode, year, gini_disp)
 
 # -------------------------------------------------------------------------
 # 5. MASTER MERGE & UNIFICATION
@@ -602,5 +713,3 @@ write.csv(final_data_complete, "GRAVE_M_Master_Dataset_Final_v3.csv", row.names 
 
 # Validation: Check coverage pre-1960
 summary(final_data_complete %>% filter(year < 1960) %>% select(log_gdp_pc))
-
-
