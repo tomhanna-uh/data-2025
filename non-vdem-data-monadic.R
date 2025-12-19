@@ -397,8 +397,7 @@ write_csv(final_data, here("ready_data","rave-m2.csv"))
 GDPL <- haven::read_dta(here("raw-data","identifying_ideologues.dta"))
 
 
-library(dplyr)
-library(tidyr)
+
 
 # -------------------------------------------------------------------------
 # MODULE: GLI (Global Leader Ideology) INTEGRATION
@@ -476,5 +475,132 @@ write_csv(final_data, here("ready_data","grave-m.csv"))
         
 
 
+library(haven)
+library(WDI)
+library(zoo)   # For interpolation
+library(countrycode)
+
+# -------------------------------------------------------------------------
+# MODULE: ECONOMIC & GOVERNANCE INTEGRATION
+# -------------------------------------------------------------------------
+# Prerequisites:
+# 1. 'final_data' exists (V-Dem/MIDS/ALBA/RED/ATOP/GLI).
+# 2. 'maddison2023_web.dta' is in your working directory.
+# 3. 'swiid_summary.csv' and 'ross_oil_gas.csv' are available.
+
+# -------------------------------------------------------------------------
+# 1. MADDISON PROJECT (Historical Baseline)
+# -------------------------------------------------------------------------
+# Load Maddison Stata file
+maddison_raw <- read_dta(here("raw-data","maddison2023_web.dta"))
+
+maddison_clean <- maddison_raw %>%
+        # Maddison uses 'countrycode' (ISO3) and 'year'.
+        # Variable 'gdppc' is Real GDP per capita (2011 $).
+        # Variable 'pop' is Population (in thousands).
+        mutate(
+                COWcode = countrycode(countrycode, "iso3c", "cown"),
+                # Convert Pop to raw units (Maddison is in 1000s)
+                pop_raw = pop * 1000
+        ) %>%
+        filter(!is.na(COWcode)) %>%
+        select(COWcode, year, maddison_gdp_pc = gdppc, maddison_pop = pop_raw)
+
+# -------------------------------------------------------------------------
+# 2. WDI & WGI (Modern Indicators & Governance)
+# -------------------------------------------------------------------------
+# Fetch WDI/WGI from 1960-2024
+indicators <- c(
+        "gdp_pc" = "NY.GDP.PCAP.PP.KD",       # GDP pc PPP (Constant 2017)
+        "pop" = "SP.POP.TOT",                 # Total Population
+        "resource_rents" = "NY.GDP.TOTL.RT.ZS", # Natural Resource Rents %
+        "corruption_control" = "CC.EST",      # WGI Control of Corruption
+        "govt_effectiveness" = "GE.EST"       # WGI Govt Effectiveness
+)
+
+wdi_raw <- WDI(indicator = indicators, start = 1960, end = 2024, extra = TRUE)
+
+wdi_clean <- wdi_raw %>%
+        mutate(COWcode = countrycode(iso2c, "iso2c", "cown")) %>%
+        filter(!is.na(COWcode)) %>%
+        group_by(COWcode) %>%
+        arrange(year) %>%
+        mutate(
+                # Interpolate WGI gaps (1996-2002)
+                corruption_control = na.approx(corruption_control, x = year, rule = 2, na.rm = FALSE),
+                govt_effectiveness = na.approx(govt_effectiveness, x = year, rule = 2, na.rm = FALSE)
+        ) %>%
+        ungroup() %>%
+        select(COWcode, year, wdi_gdp_pc = gdp_pc, wdi_pop = pop, resource_rents, 
+               corruption_control, govt_effectiveness)
+
+# -------------------------------------------------------------------------
+# 3. ROSS OIL & GAS (Historical Rents)
+# -------------------------------------------------------------------------
+ross_raw <- read.csv("ross_oil_gas.csv")
+
+ross_clean <- ross_raw %>%
+        select(COWcode = id, year, oil_gas_pop = oil_gas_pop_2014) %>%
+        mutate(
+                is_petro_state_ross = ifelse(oil_gas_pop > 100, 1, 0)
+        )
+
+# -------------------------------------------------------------------------
+# 4. SWIID (Inequality)
+# -------------------------------------------------------------------------
+swiid_raw <- read.csv("swiid_summary.csv")
+
+swiid_clean <- swiid_raw %>%
+        mutate(COWcode = countrycode(country, "country.name", "cown")) %>%
+        filter(!is.na(COWcode)) %>%
+        select(COWcode, year, gini_disp = gini_disp_mean)
+
+# -------------------------------------------------------------------------
+# 5. MASTER MERGE & UNIFICATION
+# -------------------------------------------------------------------------
+
+final_data_complete <- final_data %>%
+        # Merge all economic sources
+        left_join(maddison_clean, by = c("COWcode", "year")) %>%
+        left_join(wdi_clean, by = c("COWcode", "year")) %>%
+        left_join(ross_clean, by = c("COWcode", "year")) %>%
+        left_join(swiid_clean, by = c("COWcode", "year")) %>%
+        
+        # CONSTRUCT UNIFIED VARIABLES
+        mutate(
+                # A. UNIFIED GDP PC (Prioritize WDI, fill historic with Maddison)
+                # Note: Scales differ (2017$ vs 2011$). Log transform smooths this, 
+                # but for precision, we trust WDI for the modern era.
+                unified_gdp_pc = ifelse(!is.na(wdi_gdp_pc), wdi_gdp_pc, maddison_gdp_pc),
+                log_gdp_pc = log(unified_gdp_pc),
+                
+                # B. UNIFIED POPULATION
+                unified_pop = ifelse(!is.na(wdi_pop), wdi_pop, maddison_pop),
+                log_pop = log(unified_pop),
+                
+                # C. UNIFIED PETRO-STATE DUMMY
+                # Use Ross (historical/stable), fallback to WDI > 10%
+                is_petro_state = case_when(
+                        !is.na(is_petro_state_ross) ~ is_petro_state_ross,
+                        !is.na(resource_rents) & resource_rents > 10 ~ 1,
+                        !is.na(resource_rents) & resource_rents <= 10 ~ 0,
+                        TRUE ~ 0 # Conservative
+                ),
+                
+                # D. CONTINUOUS RESOURCE WEALTH
+                log_oil_gas_wealth = log(oil_gas_pop + 1)
+        ) %>%
+        
+        # Cleanup intermediate columns
+        select(-maddison_gdp_pc, -maddison_pop, -wdi_gdp_pc, -wdi_pop, 
+               -is_petro_state_ross, -oil_gas_pop)
+
+# -------------------------------------------------------------------------
+# 6. EXPORT FINAL DATASET
+# -------------------------------------------------------------------------
+write.csv(final_data_complete, "GRAVE_M_Master_Dataset_Final_v3.csv", row.names = FALSE)
+
+# Validation: Check coverage pre-1960
+summary(final_data_complete %>% filter(year < 1960) %>% select(log_gdp_pc))
 
 
