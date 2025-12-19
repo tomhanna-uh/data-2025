@@ -11,34 +11,31 @@ vdem_data <- vdem
 
 # Load the ERT dataset using the 'get_eps' function from the ERT package [4]
 # This dataset contains the Episodes of Regime Transformation [5].
-ert_data <- get_eps() 
+ert_data <- get_eps()
 
 # 3. Combine the datasets into a single panel dataframe
 
 # We merge the datasets using standard identifier variables:
 # country_id (V-Dem Country ID) [6-8] and year [6, 7, 9].
-vdem_ert_data <- left_join(vdem_data, ert_data, 
-                           by = c("country_id", "year")) 
 
-vdem_ert_data <- vdem_ert_data %>%
-        rename(country_name = country_name.x)
+vdem_ert_data <- left_join(vdem_data, ert_data,
+                           by = c("country_id", "year"))
 
-vdem_ert_data <- vdem_ert_data %>%
+ vdem_ert_data <- vdem_ert_data %>%
+         rename(country_name = country_name.x)
+
+ vdem_ert_data <- vdem_ert_data %>%
         rename(country_text_id = country_text_id.x)
 
-vdem_ert_data <- vdem_ert_data %>%
-        
-        # 1. Keep the original V-Dem Country ID but rename it for clarity.
+ vdem_ert_data <- vdem_ert_data %>%
+
+      # 1. Keep the original V-Dem Country ID but rename it for clarity.
         # The original merge used "country_id" [4].
-        rename(vdem_id = country_id) %>%
-        
-        # 2. Set the COW code as the new primary country identifier.
-        # V-Dem data includes the 'COWcode' variable [3].
-        # We must use COW codes for CShapes compatibility (as CShapes uses COW/GW codes) [1, 476, Conversation History].
-        mutate(country_id = COWcode) %>%
-        
-        # 3. Ensure the new primary ID is an integer (for dyad creation and subsequent CShapes functions).
-        mutate(country_id = as.integer(country_id))
+         rename(vdem_id = country_id)
+
+
+
+
 
 # 1. Store the original names (V-Dem tags)
 original_names <- names(vdem_ert_data)
@@ -65,8 +62,8 @@ saveRDS(name_map, "variable_name_map.rds")
 # --- B. Define Original V-Dem Tags to Keep ---
 # This list uses the standard V-Dem tags (as found in the codebook)
 original_tags_to_keep <- c(
-        # Core Identifiers (Identifier variables often use underscores) [1, 1-4]
-        "country_name", "year", "country_id", "country_text_id",
+        # Core Identifiers (Identifier variables often use underscores) [1, 1-4,22]
+        "country_name", "year", "country_id", "country_text_id","COWcode",
         
         # High-Level Democracy Indices (5 Core) [5]
         "v2x_polyarchy",    # Electoral democracy index [4]
@@ -116,41 +113,35 @@ mapped_names_to_keep <- name_map %>%
 
 # --- D. Execute Cleaning using the Mapped Names ---
 
-vdem_ert_data_cleaned <- vdem_ert_data %>%
+vdem_ert_final <- vdem_ert_data_cleaned_names %>% 
         
-        # NOTE: Assuming vdem_ert_data is the dataframe *after* the initial clean_names() run.
-        # If it is the *uncleaned* data, you must run clean_names() now:
-        # vdem_ert_data_cleaned <- vdem_ert_data %>% janitor::clean_names() %>% 
-        
-        # Select variables using the *exact* janitor names retrieved from the map (Step C)
+        # 1. Select variables using the *exact* janitor names retrieved from the map
         select(
                 all_of(mapped_names_to_keep), 
                 
-                # Keep all ERT-specific variables by pattern matching (ERT tags often contain "ep" for episodes or "reg" for regime)
-                contains("_ep"), 
-                contains("reg_trans"), # Regime transition [26]
-                contains("row_reg"),   # RoW regime change [27]
-                contains("aut_"),      # Autocratization episode identifiers [28]
-                contains("dem_")       # Democratization episode identifiers [29]
+                # 2. Keep ERT-specific variables (ERT variables are usually already clean, but janitor affects them too)
+                # Note: 'clean_names' usually converts camelCase to snake_case.
+                # Check if 'aut_ep' or 'dem_ep' patterns persist after cleaning.
+                contains("reg_trans"), 
+                contains("aut_"),      
+                contains("dem_")       
         ) %>%
         
-        # REMOVE all Historical V-Dem data (which start with "v3") [30-32]
-        # janitor() preserves the 'v3' prefix.
+        # 3. Remove Historical V-Dem data (v3 prefix)
         select(-starts_with("v3")) %>%
         
-        # Remove suffixes related to measurement model variants (Type C variables) [33-35]
-        # This cleans up suffixes like _sd, _mean, _nr, etc., from the remaining KEPT variables.
+        # 4. Remove measurement model metadata (suffixes)
+        # Ensure these suffixes match what janitor produces (usually underscores remain underscores)
         select(-ends_with("_codelow"), -ends_with("_codehigh"), -ends_with("_sd"),
                -ends_with("_mean"), -ends_with("_nr"), -ends_with("_osp"), -ends_with("_ord")) %>%
-
         
-        # Deduplicate columns if patterns and explicit selection overlapped
-        distinct(.)
+        # 5. Deduplicate rows
+        distinct()
 
-print(names(vdem_ert_data_cleaned))
-print(dim(vdem_ert_data_cleaned))
+print(names(vdem_ert_final))
+print(dim(vdem_ert_final))
 
-vdem_ert_data_cleaned <- vdem_ert_data_cleaned %>%
+vdem_ert_data_cleaned <- vdem_ert_final %>%
         dplyr::filter(year >= 1946)
 
 
