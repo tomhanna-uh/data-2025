@@ -101,7 +101,8 @@ original_tags_to_keep <- c(
         "v2clacjstm",         # Access to justice for men [17, 18, 22]
         "v2clacjstw",         # Access to justice for women [17, 18, 23]
         "v2clprptym",         # Property rights for men [17-19, 24]
-        "v2clprptyw"          # Property rights for women [17-19, 25]
+        "v2clprptyw",          # Property rights for women [17-19, 25]
+        "v2x_corr"                # Control of corruption index [16, 26]
 )
 
 # --- C. Map Tags to Cleaned Names ---

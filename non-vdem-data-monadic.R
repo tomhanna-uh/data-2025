@@ -1,44 +1,42 @@
+# -------------------------------------------------------------------------
+# GRAVE-M Master Data Pipeline
+# Author: Tom Hanna
+# Description: Merges V-Dem, MIDS, ALBA, RED, ATOP, GLI, and Econ/Gov Data
+# -------------------------------------------------------------------------
+
 library(tidyverse)
 library(dplyr)
 library(tidyr)
-library(haven) # For reading Stata (.dta) files
-library(WDI)
-library(zoo)   # For interpolation
-library(countrycode)
-library(here)  # For project-relative paths
-library(readr)
+library(haven)       # For reading Stata (.dta) files
+library(WDI)         # World Development Indicators
+library(zoo)         # For interpolation
+library(countrycode) # For standardized country codes
+library(here)        # For project-relative paths
+library(readr)       # For reading CSVs
 
+# Ensure output directory exists
+if (!dir.exists(here("ready_data"))) dir.create(here("ready_data"))
 
-## load V-Dem/ERT data into monadic panel named main_data
+# -------------------------------------------------------------------------
+# LOAD V-DEM/ERT DATA (Monadic Panel)
+# -------------------------------------------------------------------------
 
-main_data <- read_csv(here("ready_data","vdem_ert_combined_panel_s.csv"))
+main_data <- read_csv(here("ready_data", "vdem_ert_combined_panel_s.csv"))
 
 main_data <- main_data %>%
-        filter(year >= 1946)
+        filter(year >= 1946) %>%
+        rename(COWcode = co_wcode) # rename co_wcode to COWcode
 
-# rename co_wcode to COWcode
+# -------------------------------------------------------------------------
+# LOAD & PROCESS MIDS (Directed Dyad -> Monadic)
+# -------------------------------------------------------------------------
 
-main_data <- main_data %>%
-        rename(COWcode = co_wcode)
-
-# load directed dyad MIDS data into dataframe named mids 
-
-MIDS <- read_csv(here("raw-data","dyadic_mid.csv"))
+MIDS <- read_csv(here("raw-data", "dyadic_mid.csv"))
 
 MIDS <- MIDS %>%
         filter(year >= 1946 & year <= 2020)
 
-
-# convert MIDS to monadic data
-
-
-library(dplyr)
-library(tidyr)
-
-# -------------------------------------------------------------------------
 # STEP 1: CLEAN DYADIC DATA FIRST
-# -------------------------------------------------------------------------
-
 mids_clean <- MIDS %>%
         mutate(
                 # CORRECTION: Using 'hihosta' as the variable name
@@ -49,10 +47,7 @@ mids_clean <- MIDS %>%
                 fatlev_clean = ifelse(fatlev == -9, NA, fatlev)
         )
 
-# -------------------------------------------------------------------------
 # STEP 2: AGGREGATE TO MONADIC (COUNTRY-YEAR)
-# -------------------------------------------------------------------------
-
 mids_monadic <- mids_clean %>%
         # Group by the Focal Country (statea) and Year
         group_by(statea, year) %>%
@@ -66,43 +61,32 @@ mids_monadic <- mids_clean %>%
                 mid_count_targeted = sum(dyad_rolea == 3, na.rm = TRUE),
                 
                 # --- INTENSITY (Hostility) ---
-                # Max hostility reached by State A specifically (using corrected variable)
+                # Max hostility reached by State A specifically
                 mid_max_hostility = max(hihosta_clean, na.rm = TRUE),
                 
                 # --- FATALITY (Robust Handling) ---
-                
                 # Feature A: Did they experience a high-fatality event? (Binary)
-                # Checks if ANY dispute that year reached level 4, 5, or 6 (>250 deaths)
                 mid_high_fatality_event = max(ifelse(fatlev_clean >= 4, 1, 0), na.rm = TRUE),
                 
                 # Feature B: The "Deadliness" Ceiling
-                # What was the highest category of fatality experienced this year?
                 mid_max_fatality_cat = max(fatlev_clean, na.rm = TRUE),
                 
                 # Feature C: Fatal Dispute Count
-                # How many disputes involved *at least* some deaths (Level > 0)?
                 mid_count_fatal_disputes = sum(fatlev_clean > 0, na.rm = TRUE),
                 
                 .groups = "drop"
         ) %>%
-        
-        # -----------------------------------------------------------------------
-# STEP 3: CLEAN UP INFINITIES AND NAs
-# -----------------------------------------------------------------------
-mutate(
-        # Fix max() warnings where all inputs were NA (returns -Inf)
-        mid_max_hostility = ifelse(is.infinite(mid_max_hostility), NA, mid_max_hostility),
-        mid_max_fatality_cat = ifelse(is.infinite(mid_max_fatality_cat), NA, mid_max_fatality_cat),
-        mid_high_fatality_event = ifelse(is.infinite(mid_high_fatality_event), 0, mid_high_fatality_event)
-)
+        # STEP 3: CLEAN UP INFINITIES AND NAs
+        mutate(
+                # Fix max() warnings where all inputs were NA (returns -Inf)
+                mid_max_hostility = ifelse(is.infinite(mid_max_hostility), NA, mid_max_hostility),
+                mid_max_fatality_cat = ifelse(is.infinite(mid_max_fatality_cat), NA, mid_max_fatality_cat),
+                mid_high_fatality_event = ifelse(is.infinite(mid_high_fatality_event), 0, mid_high_fatality_event)
+        )
 
-# -------------------------------------------------------------------------
 # STEP 4: MERGE WITH MAIN V-DEM DATA
-# -------------------------------------------------------------------------
-
 final_dataset <- main_data %>%
         left_join(mids_monadic, by = c("COWcode" = "statea", "year" = "year")) %>%
-        
         # Replace NAs with 0 for the COUNT variables (Peace Years)
         mutate(
                 mid_count_total = replace_na(mid_count_total, 0),
@@ -119,154 +103,92 @@ final_dataset <- main_data %>%
 # Inspection
 summary(final_dataset$mid_max_hostility)
 
-
-# Add ALBA membership
-
 # -------------------------------------------------------------------------
+# ALBA MEMBERSHIP MODULE
+# -------------------------------------------------------------------------
+
 # STEP 1: DEFINE ALBA MEMBERSHIP DATA
-# -------------------------------------------------------------------------
-# Since ALBA membership is small, hardcoding a lookup table is safer 
-# and faster than trying to merge an external CSV.
-# Dates based on official accession/withdrawal.
-
 alba_roster <- tribble(
         ~COWcode, ~start_year, ~end_year, ~country_name,
         101,      2004,        9999,      "Venezuela",
         40,       2004,        9999,      "Cuba",
-        145,      2006,        2019,      "Bolivia",      # Withdrew after 2019 crisis (Jeanine Áñez)
+        145,      2006,        2019,      "Bolivia",      # Withdrew after 2019 crisis
         93,       2007,        9999,      "Nicaragua",
         53,       2008,        9999,      "Dominica",
-        91,       2008,        2010,      "Honduras",     # Withdrew Jan 2010 after 2009 coup
-        130,      2009,        2018,      "Ecuador",      # Withdrew Aug 2018 (Lenín Moreno)
+        91,       2008,        2010,      "Honduras",     # Withdrew Jan 2010
+        130,      2009,        2018,      "Ecuador",      # Withdrew Aug 2018
         58,       2009,        9999,      "Antigua & Barbuda",
         56,       2009,        9999,      "St. Vincent & Grenadines",
         57,       2013,        9999,      "St. Lucia",
         55,       2014,        9999,      "Grenada",
         60,       2014,        9999,      "St. Kitts & Nevis"
-        # Note: Suriname and Haiti are often "observers" or "special guests" 
-        # but usually not considered full members for treaty purposes. 
-        # Adjust above if your definition differs.
 )
 
-# -------------------------------------------------------------------------
 # STEP 2: APPLY LOGIC TO MAIN DATASET
-# -------------------------------------------------------------------------
-
-main_data_alba <- main_data %>%
-        # Perform a Left Join to attach ALBA dates to the matching countries
+main_data_alba <- final_dataset %>%
         left_join(alba_roster %>% select(COWcode, start_year, end_year), by = "COWcode") %>%
-        
         mutate(
                 # 1. DEFINE LATIN AMERICA & CARIBBEAN (LAC) REGION
-                # COW codes 2-199 are Americas.
-                # We exclude 2 (USA) and 20 (Canada).
+                # COW codes 2-199 are Americas. Exclude 2 (USA) and 20 (Canada).
                 is_lac_region = (COWcode > 20 & COWcode < 200),
                 
-                # 2. DEFINE ELIGIBILITY (The "Possibility" Variable)
-                # A country is "Eligible" (in the risk set) ONLY if:
-                # A) It is in the LAC region
-                # B) The year is 2004 or later (ALBA didn't exist before)
+                # 2. DEFINE ELIGIBILITY
                 alba_possible = ifelse(is_lac_region & year >= 2004, 1, 0),
                 
                 # 3. DEFINE TREATMENT (Membership)
-                # Logic:
-                # - Must have a start_year (meaning they matched the roster)
-                # - Current year must be >= start_year
-                # - Current year must be <= end_year (handles Honduras/Ecuador/Bolivia exits)
-                # - Handling NAs: If start_year is NA, they are not members.
                 alba_member = case_when(
-                        is.na(start_year) ~ 0,           # Not in the roster -> 0
-                        year >= start_year & year <= end_year ~ 1, # Active member
-                        TRUE ~ 0                         # Before joining or after leaving -> 0
+                        is.na(start_year) ~ 0,
+                        year >= start_year & year <= end_year ~ 1,
+                        TRUE ~ 0
                 )
         ) %>%
-        
-        # Cleanup auxiliary columns
         select(-start_year, -end_year, -is_lac_region)
 
-# -------------------------------------------------------------------------
 # CHECKS
-# -------------------------------------------------------------------------
-# Check 1: Non-LAC countries should be 0 for both
-# Should return 0 rows
+# Check 1: Non-LAC countries should be 0 (Should return 0 rows)
 main_data_alba %>% 
         filter(COWcode >= 200 & (alba_member == 1 | alba_possible == 1)) %>%
         select(COWcode, year, alba_member, alba_possible)
 
-# Check 2: Pre-2004 should be 0 for both
-# Should return 0 rows
+# Check 2: Pre-2004 should be 0 (Should return 0 rows)
 main_data_alba %>% 
         filter(year < 2004 & (alba_member == 1 | alba_possible == 1)) %>% 
         select(COWcode, year, alba_member, alba_possible)
 
-# Check 3: Verify Honduras (Joined 2008, Left 2010)
-main_data_alba %>% 
-        filter(COWcode == 91 & year >= 2007 & year <= 2011) %>%
-        select(COWcode, year, alba_member, alba_possible)
-
-
-## Save this ave-m.csv
-
-write_csv(main_data_alba, here("ready_data","ave-m.csv"))
-
-## Save alba_roster as alba_roster.csv
-
-write_csv(alba_roster, here("ready_data","alba_roster.csv"))
-
-
-# load trade data from RED dataset
-
-RED <- read_csv(here("raw-data","RED_full_final.csv"))
-
-RED <- RED %>%
-        filter(year >= 1946 & year <= 2020)
-
-
+# Save intermediate files
+write_csv(main_data_alba, here("ready_data", "ave-m.csv"))
+write_csv(alba_roster, here("ready_data", "alba_roster.csv"))
 
 # -------------------------------------------------------------------------
-# MODULE: RED DYADIC TO MONADIC TRANSFORMATION
+# RED (TRADE) MODULE: DYADIC TO MONADIC
 # -------------------------------------------------------------------------
+
+RED <- read_csv(here("raw-data", "RED_full_final.csv"))
+RED <- RED %>% filter(year >= 1946 & year <= 2020)
 
 # 1. SETUP
-# Define the COW codes for Strategic Partners
-# USA: 2, China: 710, Venezuela: 101
-strategic_partners <- c(2, 710, 101)
-
-# Define ALBA Bloc (excluding Venezuela for separate tracking if desired, 
-# or keep generic). Here we list the core members.
+strategic_partners <- c(2, 710, 101) # USA, China, Venezuela
 alba_bloc_codes <- c(40, 145, 93, 53, 91, 130, 58, 56, 57, 55, 60)
 
 # 2. AGGREGATION
-# We group by 'exporter_cow' because the RED dataset is directed.
-# Row A->B contains A's export importance AND A's import importance regarding B.
-# So 'exporter_cow' is effectively the "Focal Country".
-
 red_monadic <- RED %>%
         group_by(exporter_cow, year) %>%
         summarize(
                 # --- A. EXPORT DEPENDENCE (Market Vulnerability) ---
-                # "If I lose this buyer, does my economy crash?"
-                
-                # 1. Structural Vulnerability (HHI)
-                # Formula: Sum of (Share)^2. 
-                # RED is 0-100, so we divide by 100 to get 0-1 range before squaring.
-                # Result: 0 (Perfectly Diversified) to 1 (Monopsony Dependence).
+                # Structural Vulnerability (HHI)
                 trade_export_hhi = sum((RED_export_importance / 100)^2, na.rm = TRUE),
                 
-                # 2. Strategic Dependence (Specific Partners)
+                # Strategic Dependence
                 exp_dep_usa = sum(RED_export_importance[importer_cow == 2], na.rm = TRUE),
                 exp_dep_china = sum(RED_export_importance[importer_cow == 710], na.rm = TRUE),
                 exp_dep_venezuela = sum(RED_export_importance[importer_cow == 101], na.rm = TRUE),
                 exp_dep_alba_bloc = sum(RED_export_importance[importer_cow %in% alba_bloc_codes], na.rm = TRUE),
                 
                 # --- B. IMPORT DEPENDENCE (Supply Vulnerability) ---
-                # "If I lose this supplier, do I lose my energy/food?" (Crucial for Petrocaribe)
-                
-                # 1. Structural Vulnerability (HHI)
+                # Structural Vulnerability (HHI)
                 trade_import_hhi = sum((RED_import_importance / 100)^2, na.rm = TRUE),
                 
-                # 2. Strategic Dependence (Specific Partners)
-                # Note: High dependence on Ven here is the "Oil Leverage" signal.
+                # Strategic Dependence
                 imp_dep_usa = sum(RED_import_importance[importer_cow == 2], na.rm = TRUE),
                 imp_dep_china = sum(RED_import_importance[importer_cow == 710], na.rm = TRUE),
                 imp_dep_venezuela = sum(RED_import_importance[importer_cow == 101], na.rm = TRUE),
@@ -276,53 +198,27 @@ red_monadic <- RED %>%
         )
 
 # 3. MERGE WITH MAIN DATASET
-# Merge into your master 'main_data_alba' frame.
 final_dataset <- main_data_alba %>%
-        left_join(red_monadic, by = c("COWcode" = "exporter_cow", "year" = "year")) %>%
-        
-        # 4. HANDLING MISSING DATA
-        # Unlike MIDS, missing RED data usually means "No Report," not "Zero".
-        # We leave them as NA so MICE can impute them based on Region/GDP/Year.
-        # However, if you prefer to assume missing = 0 trade (risky but common),
-        # uncomment the mutate block below.
-        
-        # I recommend leaving as NA for the Transformer workflow.
-        identity() 
+        left_join(red_monadic, by = c("COWcode" = "exporter_cow", "year" = "year"))
 
-# Check the Venezuela Import Dependence (Key for Autocracy Promotion theory)
+# Check Venezuela Import Dependence
 summary(final_dataset$imp_dep_venezuela)
 
-# save final_dataset as rave-m.csv
-
-write_csv(final_dataset, here("ready_data","rave-m.csv"))
-
-
-# load alliance data from ATOP dataset
-
-ATOP_ddyr <- read_csv(here("raw-data","atop5_1ddyr_NNA.csv"))
-
-
-# correct name so next step works
-
-final_data <- final_dataset
+# Save intermediate
+write_csv(final_dataset, here("ready_data", "rave-m.csv"))
 
 # -------------------------------------------------------------------------
-# MODULE: ATOP DYADIC TO MONADIC TRANSFORMATION
+# ATOP ALLIANCES MODULE
 # -------------------------------------------------------------------------
-# Prerequisites:
-# 1. 'final_data' exists (Contains V-Dem + MIDS + ALBA + RED).
-# 2. 'ATOP_ddyr' exists (Loaded from ATOP 5.0 Directed Dyad CSV).
-# 3. 'COWcode' is the country key (CamelCase).
-# 4. 'v2x_libdem' is the regime variable (snake_case).
+
+ATOP_ddyr <- read_csv(here("raw-data", "atop5_1ddyr_NNA.csv"))
+final_data <- final_dataset # Update working object name
 
 # 1. SETUP: PREPARE PARTNER REGIME LOOKUP
-# We pull this from 'final_data' to ensure we use the same regime definitions.
 partner_regime_lookup <- final_data %>%
         select(COWcode, year, v2x_libdem) %>%
         mutate(
-                # Define "Autocracy" vs "Democracy" for the weights.
-                # v2x_libdem range is 0-1.
-                # < 0.5 is the standard threshold for "Non-Liberal" (Autocracy/Anocracy).
+                # v2x_libdem < 0.5 is threshold for "Non-Liberal"
                 is_autocracy_partner = ifelse(v2x_libdem < 0.5, 1, 0),
                 is_democracy_partner = ifelse(v2x_libdem >= 0.5, 1, 0)
         )
@@ -330,56 +226,39 @@ partner_regime_lookup <- final_data %>%
 # 2. PREPARE ATOP DATA
 atop_clean <- ATOP_ddyr %>%
         select(
-                stateA,       # The Promisor (Focal Country)
-                stateB,       # The Promisee (Partner)
-                year,
-                defense,      # Defense Pact (1=Yes)
-                offense,      # Offense Pact (1=Yes) - Critical Signal for Aggression
-                nonagg,       # Non-Aggression Pact (1=Yes)
-                consul        # Consultation Pact (1=Yes)
+                stateA, stateB, year, defense, offense, nonagg, consul
         ) %>%
-        # Filter to your study period (1946+) to match V-Dem
         filter(year >= 1946)
 
 # 3. MERGE PARTNER REGIME INFO
-# We join the lookup to 'stateB' (The Partner) using 'COWcode'
 atop_weighted <- atop_clean %>%
         left_join(partner_regime_lookup, by = c("stateB" = "COWcode", "year" = "year"))
 
 # 4. AGGREGATION (Partner-Weighted)
-# We group by the Focal Country (stateA) and Year.
 atop_monadic <- atop_weighted %>%
         group_by(stateA, year) %>%
         summarize(
-                # --- DEFENSE PACTS (Protective Shield) ---
+                # --- DEFENSE PACTS ---
                 atop_defense_total = sum(defense, na.rm = TRUE),
-                # The "Autocratic Defense Network"
                 atop_defense_with_auto = sum(defense * is_autocracy_partner, na.rm = TRUE),
                 
-                # --- OFFENSE PACTS (Aggressive Intent) ---
+                # --- OFFENSE PACTS ---
                 atop_offense_total = sum(offense, na.rm = TRUE),
-                # Explicit coordination with other autocrats for aggression
                 atop_offense_with_auto = sum(offense * is_autocracy_partner, na.rm = TRUE),
                 
-                # --- NON-AGGRESSION PACTS (Strategic Clearance) ---
+                # --- NON-AGGRESSION PACTS ---
                 atop_nonagg_total = sum(nonagg, na.rm = TRUE),
                 atop_nonagg_with_auto = sum(nonagg * is_autocracy_partner, na.rm = TRUE),
                 
-                # --- CONSULTATION PACTS (Signaling) ---
+                # --- CONSULTATION PACTS ---
                 atop_consul_total = sum(consul, na.rm = TRUE),
                 
                 .groups = "drop"
         )
 
 # 5. MERGE WITH FINAL DATASET
-# Overwrite 'final_data' to include the ATOP variables.
 final_data <- final_data %>%
         left_join(atop_monadic, by = c("COWcode" = "stateA", "year" = "year")) %>%
-        
-        # 6. MISSING DATA HANDLING
-        # If a country is in V-Dem but not in ATOP for a given year, 
-        # it implies they are an "Isolate" (no alliances). 
-        # We code these NAs as 0.
         mutate(
                 atop_defense_total = replace_na(atop_defense_total, 0),
                 atop_defense_with_auto = replace_na(atop_defense_with_auto, 0),
@@ -390,56 +269,34 @@ final_data <- final_data %>%
                 atop_consul_total = replace_na(atop_consul_total, 0)
         )
 
-# Quick Inspection
+# Inspection
 summary(final_data$atop_defense_with_auto)
-
-## Save final_data as rave-m2.csv
-
-
-write_csv(final_data, here("ready_data","rave-m2.csv"))
-
-# load Global Dataset on Political Leaders, 1945-2020
-# data set is identifying_ideologues.dta a STATA file
-
-GDPL <- haven::read_dta(here("raw-data","identifying_ideologues.dta"))
-
-
-
+write_csv(final_data, here("ready_data", "rave-m2.csv"))
 
 # -------------------------------------------------------------------------
-# MODULE: GLI (Global Leader Ideology) INTEGRATION
+# GLI (Global Leader Ideology) MODULE
 # -------------------------------------------------------------------------
-# Prerequisites:
-# 1. 'final_data' exists (V-Dem + MIDS + ALBA + RED + ATOP).
-# 2. 'GDPL' exists (Loaded from the Herre 2023 dataset).
-# 3. Variable names match your report: 'country_code_cow', 'hog_ideology', 'leader_ideology'.
 
-# 1. CLEAN AND STANDARDIZE GLI DATA
+GDPL <- haven::read_dta(here("raw-data", "identifying_ideologues.dta"))
+
 gli_clean <- GDPL %>%
-        # Select and rename for clarity
         select(
-                COWcode = country_code_cow,  # Rename to match master dataset
+                COWcode = country_code_cow,
                 year,
                 leader_ideology_raw = leader_ideology,
-                hog_ideology_raw = hog_ideology # Head of Govt (if different)
+                hog_ideology_raw = hog_ideology
         ) %>%
-        # Drop rows with missing COW codes (if any)
         filter(!is.na(COWcode)) %>%
-        
-        # 2. RECODE IDEOLOGY STRINGS TO NUMERIC FACTORS
-        # Values: "leftist", "centrist", "rightist", "not applicable", "no information"
         mutate(
-                # --- LEADER IDEOLOGY (Primary) ---
+                # --- LEADER IDEOLOGY ---
                 gli_leader_ideology_num = case_when(
                         leader_ideology_raw == "leftist" ~ 1,
                         leader_ideology_raw == "centrist" ~ 2,
                         leader_ideology_raw == "rightist" ~ 3,
-                        # Treat "not applicable" and "no information" as 0 (No Ideology/Missing)
                         leader_ideology_raw %in% c("not applicable", "no information") ~ 0,
-                        TRUE ~ 0 # Fallback for NAs
+                        TRUE ~ 0
                 ),
-                
-                # --- HEAD OF GOVT IDEOLOGY (Secondary) ---
+                # --- HEAD OF GOVT IDEOLOGY ---
                 gli_hog_ideology_num = case_when(
                         hog_ideology_raw == "leftist" ~ 1,
                         hog_ideology_raw == "centrist" ~ 2,
@@ -447,23 +304,15 @@ gli_clean <- GDPL %>%
                         hog_ideology_raw %in% c("not applicable", "no information") ~ 0,
                         TRUE ~ 0
                 ),
-                
-                # --- DUMMY VARIABLES (For Interaction Terms) ---
-                # Useful if you want to test "Leftist Leader" explicitly in the model
+                # --- DUMMY VARIABLES ---
                 is_leftist_leader = ifelse(leader_ideology_raw == "leftist", 1, 0),
                 is_rightist_leader = ifelse(leader_ideology_raw == "rightist", 1, 0),
                 is_centrist_leader = ifelse(leader_ideology_raw == "centrist", 1, 0)
         )
 
-# 3. MERGE WITH FINAL DATASET
-# Overwrite 'final_data' to include GLI variables.
+# MERGE AND CLEANUP
 final_data <- final_data %>%
-        left_join(gli_clean, by = c("COWcode", "year"))
-
-# 4. FINAL CLEANUP
-# If GLI didn't cover a year (e.g. pre-1945), these will be NA.
-# We explicitly code them as 0 (No Info) to allow the model to run without crashing.
-final_data <- final_data %>%
+        left_join(gli_clean, by = c("COWcode", "year")) %>%
         mutate(
                 gli_leader_ideology_num = replace_na(gli_leader_ideology_num, 0),
                 gli_hog_ideology_num = replace_na(gli_hog_ideology_num, 0),
@@ -472,38 +321,24 @@ final_data <- final_data %>%
                 is_centrist_leader = replace_na(is_centrist_leader, 0)
         )
 
-# Quick Inspection
+# Inspection
 table(final_data$gli_leader_ideology_num)
-
-
-# save data as grave-m.csv
-
-write_csv(final_data, here("ready_data","grave-m.csv"))
-
-
-
+write_csv(final_data, here("ready_data", "grave-m.csv"))
 
 # -------------------------------------------------------------------------
 # HELPER FUNCTIONS: ROBUST JOINS
 # -------------------------------------------------------------------------
-# These functions check the types of the 'by' variables in both dataframes.
-# If they differ (e.g., numeric vs character), they coerce 'y' to match 'x'.
-
 coerce_join_keys <- function(x, y, by) {
-        # Handle named 'by' vectors (e.g., c("a" = "b"))
         by_x <- if (is.null(names(by))) by else names(by)
-        by_x[by_x == ""] <- by[by_x == ""] # Fill in unnamed elements
-        
+        by_x[by_x == ""] <- by[by_x == ""]
         by_y <- if (is.null(names(by))) by else unname(by)
         
         for (i in seq_along(by_x)) {
                 col_x <- by_x[i]
                 col_y <- by_y[i]
-                
                 if (col_x %in% names(x) && col_y %in% names(y)) {
                         cls_x <- class(x[[col_x]])[1]
                         cls_y <- class(y[[col_y]])[1]
-                        
                         if (cls_x != cls_y) {
                                 message(sprintf("Robust Join: Coercing y$%s (%s) to match x$%s (%s)", 
                                                 col_y, cls_y, col_x, cls_x))
@@ -512,7 +347,6 @@ coerce_join_keys <- function(x, y, by) {
                                 } else if (cls_x == "character") {
                                         y[[col_y]] <- as.character(y[[col_y]])
                                 } else {
-                                        # Fallback for factors or other types
                                         class(y[[col_y]]) <- cls_x
                                 }
                         }
@@ -526,52 +360,20 @@ robust_left_join <- function(x, y, by = NULL, ...) {
         dplyr::left_join(x, y_mod, by = by, ...)
 }
 
-robust_right_join <- function(x, y, by = NULL, ...) {
-        y_mod <- coerce_join_keys(x, y, by)
-        dplyr::right_join(x, y_mod, by = by, ...)
-}
-
-robust_inner_join <- function(x, y, by = NULL, ...) {
-        y_mod <- coerce_join_keys(x, y, by)
-        dplyr::inner_join(x, y_mod, by = by, ...)
-}
-
-robust_full_join <- function(x, y, by = NULL, ...) {
-        y_mod <- coerce_join_keys(x, y, by)
-        dplyr::full_join(x, y_mod, by = by, ...)
-}
-
 # -------------------------------------------------------------------------
 # MODULE: ECONOMIC & GOVERNANCE INTEGRATION
 # -------------------------------------------------------------------------
-# Prerequisites:
-# 1. 'final_data' exists (V-Dem/MIDS/ALBA/RED/ATOP/GLI).
-# 2. Raw files in 'raw-data' subfolder.
 
-# -------------------------------------------------------------------------
 # 1. MADDISON PROJECT (Historical Baseline)
-# -------------------------------------------------------------------------
-# Load Maddison Stata file from raw-data
 maddison_raw <- read_dta(here("raw-data", "maddison2023_web.dta"))
-
 maddison_clean <- maddison_raw %>%
         mutate(
-                COWcode = countrycode(
-                        countrycode, 
-                        "iso3c", 
-                        "cown",
-                        custom_match = c(
-                                "CSK" = 315, # Czechoslovakia
-                                "SUN" = 365, # Soviet Union
-                                "YUG" = 345, # Yugoslavia
-                                "SRB" = 345  # Serbia
-                        )
-                ),
+                COWcode = countrycode(countrycode, "iso3c", "cown",
+                                      custom_match = c("CSK" = 315, "SUN" = 365, "YUG" = 345, "SRB" = 345)),
                 pop_raw = pop * 1000
         ) %>%
-        mutate(COWcode = as.numeric(COWcode)) %>% # Force numeric to prevent join errors
+        mutate(COWcode = as.numeric(COWcode)) %>%
         filter(!is.na(COWcode)) %>%
-        # AGGREGATE to ensure uniqueness (avoids many-to-many errors)
         group_by(COWcode, year) %>%
         summarise(
                 maddison_gdp_pc = mean(gdppc, na.rm = TRUE),
@@ -662,58 +464,59 @@ wdi_clean <- wdi_raw %>%
                 govt_effectiveness = na.approx(govt_effectiveness, x = year, rule = 2, na.rm = FALSE)
         )
 
-# -------------------------------------------------------------------------
-# 3. ROSS OIL & GAS (Historical Rents)
-# -------------------------------------------------------------------------
+# 3. ROSS OIL & GAS
 ross_raw <- read.csv(here("raw-data", "ross_oil_gas.csv"))
-
 ross_clean <- ross_raw %>%
-        select(COWcode = id, year, oil_gas_pop = oil_gas_valuePOP_2014) %>%
         mutate(
-                COWcode = as.numeric(COWcode), # Force numeric
-                is_petro_state_ross = ifelse(oil_gas_pop > 100, 1, 0)
+                COWcode = countrycode(cty_name, "country.name", "cown",
+                                      custom_match = c("Czechoslovakia" = 315, "Soviet Union" = 365, "Yugoslavia" = 345,
+                                                       "Serbia" = 345, "Serbia and Montenegro" = 345, 
+                                                       "Yemen People's Republic" = 680, "Yemen Arab Republic" = 678,
+                                                       "German Federal Republic" = 260, "German Democratic Republic" = 265))
         ) %>%
+        mutate(COWcode = as.numeric(COWcode)) %>%
+        select(COWcode, year, oil_gas_pop = oil_gas_valuePOP_2014) %>%
+        mutate(is_petro_state_ross = ifelse(!is.na(oil_gas_pop) & oil_gas_pop > 100, 1, 0)) %>%
         filter(!is.na(COWcode)) %>%
-        # Ensure uniqueness
         distinct(COWcode, year, .keep_all = TRUE)
 
-# -------------------------------------------------------------------------
 # 4. SWIID (Inequality)
-# -------------------------------------------------------------------------
 swiid_raw <- read.csv(here("raw-data", "swiid_summary.csv"))
-
 swiid_clean <- swiid_raw %>%
         mutate(
-                COWcode = countrycode(
-                        country, 
-                        "country.name", 
-                        "cown",
-                        custom_match = c(
-                                "Serbia" = 345, "Micronesia" = 987,
-                                "Anguilla" = NA, "Greenland" = NA, "Hong Kong" = NA,
-                                "Palestinian Territories" = NA, "Puerto Rico" = NA, 
-                                "Turks and Caicos Islands" = NA
-                        )
-                )
+                COWcode = countrycode(country, "country.name", "cown",
+                                      custom_match = c("Serbia" = 345, "Micronesia" = 987, "Anguilla" = NA, "Greenland" = NA,
+                                                       "Hong Kong" = NA, "Palestinian Territories" = NA, "Puerto Rico" = NA,
+                                                       "Turks and Caicos Islands" = NA))
         ) %>%
-        mutate(COWcode = as.numeric(COWcode)) %>% # Force numeric
+        mutate(COWcode = as.numeric(COWcode)) %>%
         filter(!is.na(COWcode)) %>%
-        # AGGREGATE duplicates (e.g. Serbia/Yugoslavia overlap)
         group_by(COWcode, year) %>%
         summarise(gini_disp = mean(gini_disp, na.rm = TRUE), .groups = "drop")
 
-# -------------------------------------------------------------------------
-# 5. MASTER MERGE & UNIFICATION (Using Robust Joins)
-# -------------------------------------------------------------------------
+# 4.5 FRASER INSTITUTE (Black Market Premium)
+fraser_raw <- read.csv(here("raw-data", "black_market_exchange_rates.csv"))
+if("black_market_exchange_rates" %in% names(fraser_raw)) {
+        names(fraser_raw)[names(fraser_raw) == "black_market_exchange_rates"] <- "black_market_exchange_rate"
+}
 
+fraser_ready <- fraser_raw %>%
+        mutate(
+                COWcode = countrycode(iso_code, "iso3c", "cown",
+                                      custom_match = c("CSK" = 315, "SUN" = 365, "YUG" = 345, "SRB" = 345))
+        ) %>%
+        mutate(COWcode = as.numeric(COWcode)) %>%
+        filter(!is.na(COWcode)) %>%
+        group_by(COWcode, year) %>%
+        summarise(fraser_bmp_score = mean(black_market_exchange_rate, na.rm = TRUE), .groups = "drop")
+
+# 5. MASTER MERGE & UNIFICATION
 final_data_complete <- final_data %>%
-        # Aggregation steps above ensure uniqueness, preventing many-to-many errors.
         robust_left_join(maddison_clean, by = c("COWcode", "year")) %>%
         robust_left_join(wdi_clean, by = c("COWcode", "year")) %>%
         robust_left_join(ross_clean, by = c("COWcode", "year")) %>%
         robust_left_join(swiid_clean, by = c("COWcode", "year")) %>%
-        
-        # CONSTRUCT UNIFIED VARIABLES
+        robust_left_join(fraser_ready, by = c("COWcode", "year")) %>%
         mutate(
                 # A. UNIFIED GDP PC
                 unified_gdp_pc = ifelse(!is.na(wdi_gdp_pc), wdi_gdp_pc, maddison_gdp_pc),
@@ -724,6 +527,7 @@ final_data_complete <- final_data %>%
                 log_pop = log(unified_pop),
                 
                 # C. UNIFIED PETRO-STATE DUMMY
+                # Priority: Ross (Better history) > WDI (Modern supplement)
                 is_petro_state = case_when(
                         !is.na(is_petro_state_ross) ~ is_petro_state_ross,
                         !is.na(resource_rents) & resource_rents > 10 ~ 1,
@@ -733,16 +537,143 @@ final_data_complete <- final_data %>%
                 
                 # D. CONTINUOUS RESOURCE WEALTH
                 log_oil_gas_wealth = log(oil_gas_pop + 1)
+        )
+
+# -------------------------------------------------------------------------
+# MISSING DATA HANDLING MODULE (Fixes Top 20 Missing Items)
+# -------------------------------------------------------------------------
+final_data_complete <- final_data_complete %>%
+        mutate(
+                # 1. FIX ERT "STRUCTURAL" MISSINGNESS
+                # These are only valid during active episodes. We create clean binaries.
+                
+                # Autocratization Episode Active?
+                is_aut_episode = ifelse(!is.na(aut_ep_id), 1, 0),
+                
+                # Democratization Episode Active?
+                is_dem_episode = ifelse(!is.na(dem_ep_id), 1, 0),
+                
+                # 2. FIX GOVERNANCE/CORRUPTION (The 1946-1995 WGI Gap)
+                # If V-Dem Political Corruption (v2x_corr) exists, use it to backfill or replace WGI.
+                # Logic: Use WGI if available (modern), else fill with V-Dem (scaled to approx match if needed, 
+                # but here we just ensure we have *some* corruption measure).
+                # Note: V-Dem is 0 (Clean) to 1 (Corrupt). WGI is -2.5 (Corrupt) to 2.5 (Clean).
+                # We create a unified "Corruption Level" (Higher = More Corrupt)
+                
+                unified_corruption = case_when(
+                        # Prefer V-Dem because it's consistent 1946-2020
+                        "v2x_corr" %in% names(.) & !is.na(v2x_corr) ~ v2x_corr,
+                        # Fallback to inverted WGI normalized (roughly) if V-Dem missing
+                        !is.na(corruption_control) ~ (2.5 - corruption_control) / 5, 
+                        TRUE ~ NA_real_
+                )
         ) %>%
-        select(-maddison_gdp_pc, -maddison_pop, -wdi_gdp_pc, -wdi_pop, 
-               -is_petro_state_ross, -oil_gas_pop)
+        # 3. EXPLICITLY DROP THE HIGH-MISSINGNESS ORIGINAL COLUMNS
+        select(
+                -maddison_gdp_pc, -maddison_pop, 
+                -wdi_gdp_pc, -wdi_pop, 
+                -is_petro_state_ross, -oil_gas_pop, 
+                -starts_with("e_"),               # Remove raw V-Dem ordinals
+                
+                # Remove Structural ERT variables (replaced by binaries)
+                -starts_with("aut_ep_"),          # aut_ep_id, aut_ep_start_year, etc.
+                -starts_with("dem_ep_"),          # dem_ep_id, dem_ep_termination, etc.
+                -contains("founding_elec"),       # aut_founding_elec, dem_founding_elec
+                
+                # Remove Raw WGI variables (replaced by unified_corruption)
+                -corruption_control, 
+                -govt_effectiveness
+        )
 
-# -------------------------------------------------------------------------
 # 6. EXPORT FINAL DATASET
-# -------------------------------------------------------------------------
-# Ensure ready_data directory exists (optional safety check)
-if (!dir.exists(here("ready_data"))) dir.create(here("ready_data"))
-
 write.csv(final_data_complete, here("ready_data", "GRAVE_M_Master_Dataset_Final_v3.csv"), row.names = FALSE)
 
-summary(final_data_complete %>% filter(year < 1960) %>% select(log_gdp_pc))
+# Final Summary Check
+summary(final_data_complete %>% select(fraser_bmp_score, unified_corruption, is_aut_episode))
+
+library(tidyverse)
+library(zoo) # Essential for time series interpolation/LOCF
+
+# 1. Load Data
+# Assuming WRP_national.csv is in your working directory
+wrp_raw <- read_csv(here("raw-data","WRP_national.csv"))
+
+# 2. Define Variables of Interest
+# Selecting the percentage variables likely relevant for GRAVE-M (e.g., Catholic/Protestant for LAC)
+# You can add others from the raw CSV if needed (e.g., sunni/shia if relevant outside LAC)
+wrp_selected <- wrp_raw %>%
+        rename(COWcode = state) %>% # Rename to match GRAVE-M key
+        select(
+                year, 
+                COWcode,
+                chrstprotpct, # Protestant %
+                chrstcatpct,  # Catholic %
+                chrstorthpct, # Orthodox %
+                chrstgenpct,  # Christian General %
+                judgenpct,    # Jewish General %
+                islmgenpct,   # Muslim General %
+                budgenpct,    # Buddhist General %
+                hindgenpct,   # Hindu General %
+                nonreligpct,  # Non-Religious %
+                sumreligpct   # Sum of all religions
+        )
+
+# 3. Create Target Time Grid
+# WRP data is every 5 years (1945, 1950...). GRAVE-M is yearly (1946-2016).
+# We create a full grid of all countries and all years to force R to recognize the missing years.
+target_years <- 1946:2016
+country_list <- unique(wrp_selected$COWcode)
+
+full_grid <- expand_grid(COWcode = country_list, year = target_years)
+
+# 4. Merge and Impute
+wrp_imputed <- full_grid %>%
+        left_join(wrp_selected, by = c("COWcode", "year")) %>%
+        arrange(COWcode, year) %>%
+        group_by(COWcode) %>%
+        mutate(
+                # Step A: Linear Interpolation for gaps (e.g., 1946-1949)
+                # na.approx fills values between existing data points
+                across(
+                        ends_with("pct"), 
+                        ~na.approx(., na.rm = FALSE) 
+                ),
+                # Step B: Last Observation Carried Forward for post-2010
+                # na.locf fills trailing NAs with the last known value (2010 data)
+                across(
+                        ends_with("pct"), 
+                        ~na.locf(., na.rm = FALSE) 
+                )
+        ) %>%
+        ungroup()
+
+# 5. Clean-up
+# Some countries might have leading NAs if they didn't exist in 1945.
+# We replace remaining NAs with 0 ONLY if appropriate, otherwise leave as NA.
+# Here we filter to only the finished rows.
+final_wrp_data <- wrp_imputed %>%
+        filter(year >= 1946 & year <= 2016)
+
+# Save the processed component separately for safety
+write_csv(final_wrp_data, "processed_wrp_religion_data.csv")
+
+# 6. Merge with Master Dataset
+# We assume 'final_data_complete' exists in the environment from previous steps.
+# If running standalone, uncomment the read_csv line below.
+# final_data_complete <- read_csv("GRAVE_M_Master_Dataset_Final_v3.csv")
+
+if (exists("final_data_complete")) {
+        print("Merging WRP data into Master Dataset...")
+        
+        final_data_complete <- final_data_complete %>%
+                left_join(final_wrp_data, by = c("COWcode", "year"))
+        
+        # Save the updated master dataset with the new filename
+        write_csv(final_data_complete, here("ready_data","GRAVE_M_Master_Dataset_Final_w_religion.csv"))
+        
+        print("Merge complete. Updated dataset saved as 'GRAVE_M_Master_Dataset_Final_w_religion.csv'.")
+} else {
+        warning("Object 'final_data_complete' not found. WRP data saved as component only.")
+}
+
+print("WRP Data Processing Complete: Interpolation (1945-2010) and LOCF (2011-2016) applied.")

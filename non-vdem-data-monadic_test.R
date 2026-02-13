@@ -668,13 +668,36 @@ wdi_clean <- wdi_raw %>%
 ross_raw <- read.csv(here("raw-data", "ross_oil_gas.csv"))
 
 ross_clean <- ross_raw %>%
-        select(COWcode = id, year, oil_gas_pop = oil_gas_valuePOP_2014) %>%
+        # FIX: Generate COWcode directly from 'cty_name' to avoid issues with the original 'id' column
         mutate(
-                COWcode = as.numeric(COWcode), # Force numeric
-                is_petro_state_ross = ifelse(oil_gas_pop > 100, 1, 0)
+                COWcode = countrycode(
+                        cty_name,
+                        "country.name",
+                        "cown",
+                        custom_match = c(
+                                "Czechoslovakia" = 315,
+                                "Soviet Union" = 365,
+                                "Yugoslavia" = 345,
+                                "Serbia" = 345,
+                                "Serbia and Montenegro" = 345,
+                                "Yemen People's Republic" = 680,   # South Yemen
+                                "Yemen Arab Republic" = 678,       # North Yemen
+                                "German Federal Republic" = 260,   # West Germany
+                                "German Democratic Republic" = 265 # East Germany
+                        )
+                )
         ) %>%
+        # Force numeric to ensure compatibility with final_data
+        mutate(COWcode = as.numeric(COWcode)) %>%
+        # Select the correct 2014 constant dollar variable per your colnames()
+        select(COWcode, year, oil_gas_pop = oil_gas_valuePOP_2014) %>%
+        mutate(
+                # Create binary Petro-State indicator (Cutoff: $100 per capita)
+                is_petro_state_ross = ifelse(!is.na(oil_gas_pop) & oil_gas_pop > 100, 1, 0)
+        ) %>%
+        # Drop rows where country code could not be determined
         filter(!is.na(COWcode)) %>%
-        # Ensure uniqueness
+        # Ensure uniqueness: In case multiple entries map to the same COWcode in a year
         distinct(COWcode, year, .keep_all = TRUE)
 
 # -------------------------------------------------------------------------
