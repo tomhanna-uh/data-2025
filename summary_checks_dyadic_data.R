@@ -56,3 +56,11 @@ df %>%
         distinct(iso3a, rev_potential_a) %>%
         arrange(desc(rev_potential_a)) %>%
         head(10)
+
+
+# Quick check for dyadic analysis
+df %>%
+        mutate(dem_dist = abs(v2x_libdem_a - v2x_libdem_b)) %>%
+        select(revisionism_distance, dem_dist) %>%
+        cor(use = "complete.obs")
+
