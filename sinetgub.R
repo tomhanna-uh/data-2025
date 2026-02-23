@@ -1,14 +1,14 @@
 # =============================================================================
-# sinetgub.R — GRAVE-M Imputed Dataset: Column Inspection and Variable Renaming
+# sinetgub.R — GRAVE-D Master Dataset: Column Inspection and Validation
 # =============================================================================
-# Purpose: Load the imputed monadic dataset, inspect column names, rename
-# variables to match naming conventions expected by the dyadic pipeline
-# (grave_d2.R) and the autocracy_conflict_signaling analysis scripts.
+# Purpose: Load GRAVE_D_Master_with_Leaders.csv, inspect column names,
+# validate against the column sets expected by 01_load_data.R in the
+# autocracy_conflict_signaling analysis project, and apply any needed
+# safe renames so column names match exactly.
 #
-# After dyadic expansion in grave_d2.R, monadic base names get _a / _b
-# suffixes appended. So base names here must match the expected stems:
-#   e.g., national_military_capabilities -> sidea_national_military_capabilities
-#         religious_support               -> sidea_religious_support
+# This is a DYADIC dataset (one row per directed dyad-year). It is NOT
+# the monadic imputed dataset. The correct file is:
+#   ready_data/GRAVE_D_Master_with_Leaders.csv
 # =============================================================================
 
 library(readr)
@@ -16,122 +16,165 @@ library(dplyr)
 library(here)
 
 # -----------------------------------------------------------------------------
-# 1. Load the imputed dataset
+# 1. Load the dyadic master dataset
 # -----------------------------------------------------------------------------
-imputed_data <- read_csv(here("ready_data", "GRAVE_M_Master_Dataset_Final_v3_imputed.csv"))
+grave_d <- read_csv(here("ready_data", "GRAVE_D_Master_with_Leaders.csv"),
+                    show_col_types = FALSE)
 
-# Inspect current column names before renaming
-cat("\n--- Column names in imputed dataset (before rename) ---\n")
-print(colnames(imputed_data))
+cat("\n--- Dimensions ---\n")
+cat(sprintf("%d rows x %d columns\n", nrow(grave_d), ncol(grave_d)))
 
-cat("\n--- Structure ---\n")
-str(imputed_data)
+cat("\n--- Column names ---\n")
+print(colnames(grave_d))
 
-cat("\n--- Summary ---\n")
-summary(imputed_data)
-
-# -----------------------------------------------------------------------------
-# 2. Rename variables
-# rename(any_of(...)) silently skips columns that do not exist.
-# Named vector format: c(new_name = "old_name").
-#
-# Capabilities (COW CINC)
-#   Source name(s): cinc, national_capabilities, nmc, cow_cinc
-#   Target name:    national_military_capabilities
-#     -> dyadic result: sidea_national_military_capabilities, sideb_...
-#
-# GRAVE-D Support Group Variables
-#   Source name(s): vary by dataset version (with or without sidea_ prefix)
-#   Target base names (no side prefix; suffix added by grave_d2.R):
-#     religious_support, party_elite_support, rural_worker_support,
-#     military_support, ethnic_racial_support
-#
-# GRAVE-D Leadership Ideology Variables
-#   Target base names:
-#     revisionist_domestic
-#     nationalist_revisionist_domestic, socialist_revisionist_domestic,
-#     religious_revisionist_domestic, reactionary_revisionist_domestic
-#     dynamic_leader
-#
-# Selectorate theory
-#   winning_coalition_size
-# -----------------------------------------------------------------------------
-
-imputed_data <- imputed_data %>%
-  rename(any_of(c(
-    # --- National Military Capabilities (COW CINC) ----------------------------
-    national_military_capabilities = "cinc",
-    national_military_capabilities = "nmc",
-    national_military_capabilities = "cow_cinc",
-    national_military_capabilities = "national_capabilities",
-    national_military_capabilities = "milit_capabilities",
-
-    # --- GRAVE-D Support Group Variables (base names, no side prefix) ---------
-    # These get _a / _b appended in grave_d2.R dyadic expansion
-    religious_support          = "sidea_religious_support",
-    party_elite_support        = "sidea_party_elite_support",
-    rural_worker_support       = "sidea_rural_worker_support",
-    military_support           = "sidea_military_support",
-    ethnic_racial_support      = "sidea_ethnic_racial_support",
-
-    # If stored without side prefix already, these are no-ops (already correct):
-    # religious_support, party_elite_support, etc.
-
-    # --- GRAVE-D Leadership Ideology (base names) ----------------------------
-    revisionist_domestic                  = "sidea_revisionist_domestic",
-    nationalist_revisionist_domestic      = "sidea_nationalist_revisionist_domestic",
-    socialist_revisionist_domestic        = "sidea_socialist_revisionist_domestic",
-    religious_revisionist_domestic        = "sidea_religious_revisionist_domestic",
-    reactionary_revisionist_domestic      = "sidea_reactionary_revisionist_domestic",
-    dynamic_leader                        = "sidea_dynamic_leader",
-
-    # --- Selectorate Theory --------------------------------------------------
-    winning_coalition_size = "sidea_winning_coalition_size",
-    winning_coalition_size = "w",
-    winning_coalition_size = "wcs"
-  )))
-
-# Verify renamed columns
-cat("\n--- Column names after rename ---\n")
-print(colnames(imputed_data))
+cat("\n--- Head ---\n")
+print(head(grave_d))
 
 # -----------------------------------------------------------------------------
-# 3. Check that key expected columns are present
+# 2. Column sets required by autocracy_conflict_signaling/R/01_load_data.R
 # -----------------------------------------------------------------------------
-expected_cols <- c(
+DYAD_REQUIRED_COLS <- c(
   # Identifiers
-  "COWcode", "year",
-  # V-Dem
-  "v2x_libdem", "v2exl_legitideol", "v2exl_legitlead", "v2exl_legitperf",
+  "COWcode_a", "COWcode_b", "year",
+  # Democracy scores (V-Dem)
+  "v2x_libdem_a", "v2x_libdem_b",
+  # Conflict outcome
+  "hihosta",
+  # V-Dem legitimation variables
+  "v2exl_legitideol_a",
+  "v2exl_legitlead_a",
+  "v2exl_legitperf_a",
   # Capabilities
-  "national_military_capabilities",
-  # GRAVE support groups
-  "religious_support", "party_elite_support", "rural_worker_support",
-  "military_support", "ethnic_racial_support",
-  # GRAVE ideology
-  "revisionist_domestic", "dynamic_leader",
-  # Selectorate
-  "winning_coalition_size"
+  "sidea_national_military_capabilities",
+  "sideb_national_military_capabilities"
 )
 
-missing_cols <- setdiff(expected_cols, colnames(imputed_data))
-if (length(missing_cols) > 0) {
-  warning(
-    sprintf(
-      "[sinetgub.R] Missing expected columns after rename:\n  %s",
-      paste(missing_cols, collapse = "\n  ")
-    )
-  )
+DYAD_GRAVE_COLS <- c(
+  # GRAVE-D leadership ideology
+  "sidea_revisionist_domestic",
+  # GRAVE-D support group variables
+  "sidea_religious_support",
+  "sidea_party_elite_support",
+  "sidea_rural_worker_support",
+  "sidea_ethnic_racial_support",
+  "sidea_military_support",
+  "sidea_nationalist_revisionist_domestic",
+  "sidea_socialist_revisionist_domestic",
+  "sidea_religious_revisionist_domestic",
+  "sidea_reactionary_revisionist_domestic",
+  # GRAVE-D dynamic leadership
+  "sidea_dynamic_leader",
+  # Selectorate theory
+  "sidea_winning_coalition_size"
+)
+
+# -----------------------------------------------------------------------------
+# 3. Check for missing columns
+# -----------------------------------------------------------------------------
+missing_required <- setdiff(DYAD_REQUIRED_COLS, colnames(grave_d))
+missing_grave    <- setdiff(DYAD_GRAVE_COLS,    colnames(grave_d))
+
+if (length(missing_required) == 0) {
+  message("[sinetgub] All core required columns present.")
 } else {
-  message("[sinetgub.R] All expected columns present after rename.")
+  warning(sprintf(
+    "[sinetgub] Missing CORE columns:\n  %s",
+    paste(missing_required, collapse = "\n  ")
+  ))
+}
+
+if (length(missing_grave) == 0) {
+  message("[sinetgub] All GRAVE-D columns present.")
+} else {
+  warning(sprintf(
+    "[sinetgub] Missing GRAVE-D columns:\n  %s",
+    paste(missing_grave, collapse = "\n  ")
+  ))
 }
 
 # -----------------------------------------------------------------------------
-# 4. Save the renamed dataset (overwrites input; update path if needed)
+# 4. Safe rename block
+# rename(any_of(...)) silently skips columns that do not exist.
+# Named vector format: c(new_name = "old_name").
+#
+# Add entries here whenever the source CSV uses a different column name
+# than what 01_load_data.R expects. Common discrepancies:
+#   cinc_a / nmc_a        -> sidea_national_military_capabilities
+#   cinc_b / nmc_b        -> sideb_national_military_capabilities
+#   statea / ccode_a      -> COWcode_a
+#   stateb / ccode_b      -> COWcode_b
 # -----------------------------------------------------------------------------
-write_csv(
-  imputed_data,
-  here("ready_data", "GRAVE_M_Master_Dataset_Final_v3_imputed.csv")
-)
+grave_d <- grave_d %>%
+  rename(any_of(c(
+    # --- Identifiers ----------------------------------------------------------
+    COWcode_a = "statea",
+    COWcode_a = "ccode_a",
+    COWcode_a = "ccodea",
+    COWcode_b = "stateb",
+    COWcode_b = "ccode_b",
+    COWcode_b = "ccodeb",
 
-message("[sinetgub.R] Variable renaming complete. Dataset saved.")
+    # --- National Military Capabilities (COW CINC) ---------------------------
+    sidea_national_military_capabilities = "cinc_a",
+    sidea_national_military_capabilities = "nmc_a",
+    sidea_national_military_capabilities = "cow_cinc_a",
+    sidea_national_military_capabilities = "national_capabilities_a",
+    sideb_national_military_capabilities = "cinc_b",
+    sideb_national_military_capabilities = "nmc_b",
+    sideb_national_military_capabilities = "cow_cinc_b",
+    sideb_national_military_capabilities = "national_capabilities_b",
+
+    # --- V-Dem legitimation --------------------------------------------------
+    v2exl_legitideol_a = "v2exl_legitideol_a",  # no-op if already correct
+    v2exl_legitlead_a  = "v2exl_legitlead_a",
+    v2exl_legitperf_a  = "v2exl_legitperf_a",
+
+    # --- GRAVE-D support groups ----------------------------------------------
+    sidea_religious_support          = "religious_support_a",
+    sidea_party_elite_support        = "party_elite_support_a",
+    sidea_rural_worker_support       = "rural_worker_support_a",
+    sidea_military_support           = "military_support_a",
+    sidea_ethnic_racial_support      = "ethnic_racial_support_a",
+
+    # --- GRAVE-D ideology ----------------------------------------------------
+    sidea_revisionist_domestic             = "revisionist_domestic_a",
+    sidea_nationalist_revisionist_domestic = "nationalist_revisionist_domestic_a",
+    sidea_socialist_revisionist_domestic   = "socialist_revisionist_domestic_a",
+    sidea_religious_revisionist_domestic   = "religious_revisionist_domestic_a",
+    sidea_reactionary_revisionist_domestic = "reactionary_revisionist_domestic_a",
+    sidea_dynamic_leader                   = "dynamic_leader_a",
+
+    # --- Selectorate theory --------------------------------------------------
+    sidea_winning_coalition_size = "winning_coalition_size_a",
+    sidea_winning_coalition_size = "w_a",
+    sidea_winning_coalition_size = "wcs_a"
+  )))
+
+# -----------------------------------------------------------------------------
+# 5. Re-check after rename
+# -----------------------------------------------------------------------------
+missing_required_after <- setdiff(DYAD_REQUIRED_COLS, colnames(grave_d))
+missing_grave_after    <- setdiff(DYAD_GRAVE_COLS,    colnames(grave_d))
+
+cat("\n--- Column check after rename ---\n")
+if (length(missing_required_after) == 0 && length(missing_grave_after) == 0) {
+  message("[sinetgub] All expected columns present after rename. Ready to save.")
+} else {
+  if (length(missing_required_after) > 0)
+    warning(sprintf("[sinetgub] Still missing CORE columns:\n  %s",
+                    paste(missing_required_after, collapse = "\n  ")))
+  if (length(missing_grave_after) > 0)
+    warning(sprintf("[sinetgub] Still missing GRAVE-D columns:\n  %s",
+                    paste(missing_grave_after, collapse = "\n  ")))
+}
+
+# -----------------------------------------------------------------------------
+# 6. Save validated/renamed dataset
+# Output path matches what 01_load_data.R expects:
+#   here("data", "GRAVE_D_Master_with_Leaders.csv")
+# Run this script from the data-2025 project root before running the
+# autocracy_conflict_signaling analysis.
+# -----------------------------------------------------------------------------
+write_csv(grave_d, here("ready_data", "GRAVE_D_Master_with_Leaders.csv"))
+
+message("[sinetgub] Done. Validated dataset saved to ready_data/GRAVE_D_Master_with_Leaders.csv")
