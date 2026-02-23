@@ -1,3 +1,5 @@
+archigos_raw <- read_tsv(here("raw-data","Archigos_4.1_leaders.txt"))
+
 # Process Archigos to create country-year-leader panel
 archigos_processed <- archigos_raw %>%
         mutate(
